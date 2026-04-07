@@ -75,7 +75,19 @@ class TestDataXOperatorInit:
         assert op.datax_home == "/opt/datax"
         assert op.datax_python == "python"
         assert op.openlineage_url == "http://localhost:5000"
+        assert op.openlineage_endpoint == "api/v1/lineage"
         assert op.openlineage_namespace == "datax"
+
+    def test_custom_endpoint(self, make_operator):
+        op = make_operator(openlineage_endpoint="custom/lineage")
+        assert op.openlineage_endpoint == "custom/lineage"
+
+    def test_empty_endpoint(self, make_operator):
+        op = make_operator(
+            openlineage_url="http://localhost:5000/api/v1/lineage",
+            openlineage_endpoint="",
+        )
+        assert op.openlineage_endpoint == ""
 
     def test_datax_home_from_env(self, datax_job_config):
         with patch.dict(os.environ, {"DATAX_HOME": "/env/datax"}):
@@ -104,6 +116,35 @@ class TestDataXOperatorInit:
             )
         assert op.datax_home == "/param/datax"
         assert op.openlineage_url == "http://param:5000"
+
+
+class TestGetOpenLineageClient:
+    def test_endpoint_passed_to_http_config(self, make_operator):
+        with patch(
+            "airflow_provider_datax_openlineage.operators.datax.HttpConfig"
+        ) as mock_config, patch(
+            "airflow_provider_datax_openlineage.operators.datax.HttpTransport"
+        ):
+            op = make_operator(openlineage_endpoint="custom/endpoint")
+            op._get_openlineage_client()
+            mock_config.assert_called_once_with(
+                url="http://localhost:5000", endpoint="custom/endpoint"
+            )
+
+    def test_empty_endpoint_for_full_url(self, make_operator):
+        with patch(
+            "airflow_provider_datax_openlineage.operators.datax.HttpConfig"
+        ) as mock_config, patch(
+            "airflow_provider_datax_openlineage.operators.datax.HttpTransport"
+        ):
+            op = make_operator(
+                openlineage_url="http://localhost:5000/api/v1/lineage",
+                openlineage_endpoint="",
+            )
+            op._get_openlineage_client()
+            mock_config.assert_called_once_with(
+                url="http://localhost:5000/api/v1/lineage", endpoint=""
+            )
 
 
 class TestBuildCommand:

@@ -36,8 +36,10 @@ class DataXOperator(BaseOperator):
     :param datax_home: DataX installation directory. Falls back to ``DATAX_HOME`` env var.
     :param datax_python: Python executable used to run ``datax.py``. Defaults to ``"python"``.
     :param jvm_params: Optional dict of JVM parameters passed via ``-p`` to DataX.
-    :param openlineage_url: OpenLineage API URL. Falls back to ``OPENLINEAGE_URL`` env var.
-        If neither is set, lineage emission is skipped.
+    :param openlineage_url: OpenLineage API base URL (e.g. ``"http://host:port"``).
+        Falls back to ``OPENLINEAGE_URL`` env var. If neither is set, lineage emission is skipped.
+    :param openlineage_endpoint: API endpoint path appended to ``openlineage_url``.
+        Defaults to ``"api/v1/lineage"``. Set to ``""`` if ``openlineage_url`` already contains the full path.
     :param openlineage_namespace: Namespace used in OpenLineage Job. Defaults to ``"datax"``.
     :param extra_lineage_plugins: Additional lineage plugins for custom DataX reader/writer types.
     """
@@ -53,6 +55,7 @@ class DataXOperator(BaseOperator):
         datax_python: str = "python",
         jvm_params: dict[str, str] | None = None,
         openlineage_url: str | None = None,
+        openlineage_endpoint: str = "api/v1/lineage",
         openlineage_namespace: str = "datax",
         extra_lineage_plugins: list[BaseDataXLineagePlugin] | None = None,
         **kwargs: Any,
@@ -63,6 +66,7 @@ class DataXOperator(BaseOperator):
         self.datax_python = datax_python
         self.jvm_params = jvm_params
         self.openlineage_url = openlineage_url or os.environ.get("OPENLINEAGE_URL")
+        self.openlineage_endpoint = openlineage_endpoint
         self.openlineage_namespace = openlineage_namespace
         self.extra_lineage_plugins = extra_lineage_plugins
         self._process: subprocess.Popen | None = None  # type: ignore[type-arg]
@@ -154,7 +158,9 @@ class DataXOperator(BaseOperator):
             log.info("OpenLineage URL not configured, lineage emission is disabled.")
             return None
 
-        transport = HttpTransport(HttpConfig(url=self.openlineage_url))
+        transport = HttpTransport(
+            HttpConfig(url=self.openlineage_url, endpoint=self.openlineage_endpoint)
+        )
         return OpenLineageClient(transport=transport)
 
     def _emit_event(
