@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import os
@@ -77,34 +78,54 @@ class DataXOperator(BaseOperator):
                 "datax_home is not set. Provide it as a parameter or set the DATAX_HOME environment variable."
             )
 
-        # 1. Read and parse the DataX job config
-        job_config_dict = self._read_job_config()
+        emit_manually = self._should_emit_manual_lineage()
+        inputs: list[InputDataset] = []
+        outputs: list[OutputDataset] = []
+        run_id: str | None = None
+        job_name: str | None = None
+        ol_client: OpenLineageClient | None = None
 
-        # 2. Extract lineage datasets
-        parser = LineageParser(extra_plugins=self.extra_lineage_plugins)
-        inputs, outputs = parser.parse(job_config_dict)
+        if emit_manually:
+            inputs, outputs = self._extract_lineage_datasets()
+            run_id = str(uuid.uuid4())
+            job_name = self._build_job_name(context)
+            ol_client = self._get_openlineage_client()
 
-        # 3. Prepare OpenLineage client and run metadata
-        run_id = str(uuid.uuid4())
-        dag_id = context.get("dag", None)
-        task_id = context.get("task", None)
-        job_name = f"{dag_id.dag_id}.{task_id.task_id}" if dag_id and task_id else self.task_id
-        ol_client = self._get_openlineage_client()
+            self._emit_event(ol_client, RunState.START, run_id, job_name, inputs, outputs)
 
-        # 4. Emit START event
-        self._emit_event(ol_client, RunState.START, run_id, job_name, inputs, outputs)
-
-        # 5. Execute DataX
         try:
             result = self._run_datax()
         except Exception:
-            self._emit_event(ol_client, RunState.FAIL, run_id, job_name, inputs, outputs)
+            if emit_manually and run_id and job_name:
+                self._emit_event(ol_client, RunState.FAIL, run_id, job_name, inputs, outputs)
             raise
 
-        # 6. Emit COMPLETE event
-        self._emit_event(ol_client, RunState.COMPLETE, run_id, job_name, inputs, outputs)
+        if emit_manually and run_id and job_name:
+            self._emit_event(ol_client, RunState.COMPLETE, run_id, job_name, inputs, outputs)
 
         return result
+
+    def get_openlineage_facets_on_start(self) -> Any:
+        operator_lineage_cls, dataset_cls = self._get_openlineage_provider_types()
+        if operator_lineage_cls is None or dataset_cls is None:
+            return None
+
+        try:
+            inputs, outputs = self._extract_lineage_datasets()
+        except Exception:
+            log.exception("Failed to build OpenLineage metadata for DataXOperator")
+            return None
+
+        return operator_lineage_cls(
+            inputs=[
+                dataset_cls(namespace=dataset.namespace, name=dataset.name, facets=dataset.facets)
+                for dataset in inputs
+            ],
+            outputs=[
+                dataset_cls(namespace=dataset.namespace, name=dataset.name, facets=dataset.facets)
+                for dataset in outputs
+            ],
+        )
 
     def on_kill(self) -> None:
         if self._process and self._process.poll() is None:
@@ -112,6 +133,72 @@ class DataXOperator(BaseOperator):
             self._process.terminate()
 
     # ---- private helpers ----
+
+    def _extract_lineage_datasets(
+        self,
+    ) -> tuple[list[InputDataset], list[OutputDataset]]:
+        job_config_dict = self._read_job_config()
+        parser = LineageParser(extra_plugins=self.extra_lineage_plugins)
+        return parser.parse(job_config_dict)
+
+    def _build_job_name(self, context: Any) -> str:
+        dag = context.get("dag")
+        task = context.get("task")
+        return f"{dag.dag_id}.{task.task_id}" if dag and task else self.task_id
+
+    def _should_emit_manual_lineage(self) -> bool:
+        if not self.openlineage_url:
+            return False
+        return not self._is_official_openlineage_provider_available()
+
+    def _is_official_openlineage_provider_available(self) -> bool:
+        try:
+            conf_module = importlib.import_module("airflow.providers.openlineage.conf")
+            listener_module = importlib.import_module(
+                "airflow.providers.openlineage.plugins.listener"
+            )
+        except (ImportError, AttributeError):
+            log.debug("Official Airflow OpenLineage provider is not importable.")
+            return False
+
+        is_disabled = getattr(conf_module, "is_disabled", None)
+        get_listener = getattr(listener_module, "get_openlineage_listener", None)
+        if not callable(is_disabled) or not callable(get_listener):
+            log.debug("Official Airflow OpenLineage provider is missing required APIs.")
+            return False
+
+        try:
+            if is_disabled():
+                log.debug("Official Airflow OpenLineage provider is disabled or unconfigured.")
+                return False
+            if not get_listener():
+                log.debug("Official Airflow OpenLineage listener is unavailable.")
+                return False
+        except Exception:
+            log.exception("Failed to determine whether official OpenLineage integration is active")
+            return False
+
+        return True
+
+    def _get_openlineage_provider_types(self) -> tuple[type[Any] | None, type[Any] | None]:
+        try:
+            facet_module = importlib.import_module(
+                "airflow.providers.common.compat.openlineage.facet"
+            )
+            extractors_module = importlib.import_module(
+                "airflow.providers.openlineage.extractors"
+            )
+        except ImportError:
+            log.debug("Official Airflow OpenLineage provider types are unavailable.")
+            return None, None
+
+        dataset_cls = getattr(facet_module, "Dataset", None)
+        operator_lineage_cls = getattr(extractors_module, "OperatorLineage", None)
+        if dataset_cls is None or operator_lineage_cls is None:
+            log.debug("Official Airflow OpenLineage provider types are incomplete.")
+            return None, None
+
+        return operator_lineage_cls, dataset_cls
 
     def _read_job_config(self) -> dict:
         log.info("Reading DataX job config: %s", self.job_config)
@@ -182,7 +269,7 @@ class DataXOperator(BaseOperator):
             job=Job(namespace=self.openlineage_namespace, name=job_name),
             eventType=event_type,
             inputs=inputs,
-            outputs=outputs,
+            outputs=outputs, 
         )
 
         log.info("Emitting OpenLineage %s event for run %s", event_type.value, run_id)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import types
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -183,8 +185,18 @@ class TestExecute:
     @patch(
         "airflow_provider_datax_openlineage.operators.datax.HttpTransport",
     )
+    @patch.object(
+        DataXOperator,
+        "_is_official_openlineage_provider_available",
+        return_value=False,
+    )
     def test_success_emits_start_and_complete(
-        self, mock_transport_cls, mock_ol_cls, mock_popen, make_operator
+        self,
+        mock_provider_available,
+        mock_transport_cls,
+        mock_ol_cls,
+        mock_popen,
+        make_operator,
     ):
         # Setup subprocess mock
         process = MagicMock()
@@ -222,8 +234,18 @@ class TestExecute:
     @patch(
         "airflow_provider_datax_openlineage.operators.datax.HttpTransport",
     )
+    @patch.object(
+        DataXOperator,
+        "_is_official_openlineage_provider_available",
+        return_value=False,
+    )
     def test_failure_emits_start_and_fail(
-        self, mock_transport_cls, mock_ol_cls, mock_popen, make_operator
+        self,
+        mock_provider_available,
+        mock_transport_cls,
+        mock_ol_cls,
+        mock_popen,
+        make_operator,
     ):
         process = MagicMock()
         process.stdout = iter(["error output\n"])
@@ -283,8 +305,18 @@ class TestExecute:
     @patch("airflow_provider_datax_openlineage.operators.datax.subprocess.Popen")
     @patch("airflow_provider_datax_openlineage.operators.datax.OpenLineageClient")
     @patch("airflow_provider_datax_openlineage.operators.datax.HttpTransport")
+    @patch.object(
+        DataXOperator,
+        "_is_official_openlineage_provider_available",
+        return_value=False,
+    )
     def test_job_name_from_context(
-        self, mock_transport_cls, mock_ol_cls, mock_popen, make_operator
+        self,
+        mock_provider_available,
+        mock_transport_cls,
+        mock_ol_cls,
+        mock_popen,
+        make_operator,
     ):
         process = MagicMock()
         process.stdout = iter([])
@@ -302,6 +334,78 @@ class TestExecute:
         start_event = mock_client.emit.call_args_list[0][0][0]
         assert start_event.job.name == "test_dag.test_task"
         assert start_event.job.namespace == "datax"
+
+    @patch.object(
+        DataXOperator,
+        "_is_official_openlineage_provider_available",
+        return_value=True,
+    )
+    @patch("airflow_provider_datax_openlineage.operators.datax.subprocess.Popen")
+    @patch("airflow_provider_datax_openlineage.operators.datax.OpenLineageClient")
+    def test_provider_available_skips_manual_emit(
+        self, mock_ol_cls, mock_popen, mock_provider_available, make_operator
+    ):
+        process = MagicMock()
+        process.stdout = iter(["ok\n"])
+        process.returncode = 0
+        process.wait.return_value = 0
+        mock_popen.return_value = process
+
+        op = make_operator()
+        result = op.execute(self._make_context())
+
+        assert result["returncode"] == 0
+        mock_ol_cls.assert_not_called()
+
+
+class TestOpenLineageMethods:
+    def test_get_openlineage_facets_on_start_returns_operator_lineage(self, make_operator):
+        class FakeDataset:
+            def __init__(self, namespace, name, facets=None):
+                self.namespace = namespace
+                self.name = name
+                self.facets = facets or {}
+
+        class FakeOperatorLineage:
+            def __init__(self, inputs=None, outputs=None, run_facets=None, job_facets=None):
+                self.inputs = inputs or []
+                self.outputs = outputs or []
+                self.run_facets = run_facets or {}
+                self.job_facets = job_facets or {}
+
+        facet_module = types.ModuleType("airflow.providers.common.compat.openlineage.facet")
+        facet_module.Dataset = FakeDataset
+        extractors_module = types.ModuleType("airflow.providers.openlineage.extractors")
+        extractors_module.OperatorLineage = FakeOperatorLineage
+
+        op = make_operator()
+        with patch.dict(
+            sys.modules,
+            {
+                "airflow.providers.common.compat.openlineage.facet": facet_module,
+                "airflow.providers.openlineage.extractors": extractors_module,
+            },
+        ):
+            lineage = op.get_openlineage_facets_on_start()
+
+        assert isinstance(lineage, FakeOperatorLineage)
+        assert len(lineage.inputs) == 1
+        assert len(lineage.outputs) == 1
+        assert lineage.inputs[0].namespace == "mysql://10.0.0.1:3306"
+        assert lineage.inputs[0].name == "src_db.users"
+        assert lineage.outputs[0].namespace == "postgres://10.0.0.2:5432"
+        assert lineage.outputs[0].name == "dst_db.users_copy"
+
+    def test_get_openlineage_facets_on_start_returns_none_without_provider(self, make_operator):
+        op = make_operator()
+
+        with patch(
+            "airflow_provider_datax_openlineage.operators.datax.importlib.import_module",
+            side_effect=ImportError,
+        ):
+            lineage = op.get_openlineage_facets_on_start()
+
+        assert lineage is None
 
 
 class TestOnKill:
