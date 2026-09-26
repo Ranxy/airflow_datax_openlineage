@@ -7,6 +7,7 @@ from openlineage.client.event_v2 import InputDataset, OutputDataset
 from airflow_provider_datax_openlineage.lineage.plugins.base import BaseDataXLineagePlugin
 from airflow_provider_datax_openlineage.lineage.plugins.mysql import MysqlLineagePlugin
 from airflow_provider_datax_openlineage.lineage.plugins.postgres import PostgresLineagePlugin
+from airflow_provider_datax_openlineage.lineage.plugins.starrocks import StarrocksLineagePlugin
 
 log = logging.getLogger(__name__)
 
@@ -14,6 +15,7 @@ log = logging.getLogger(__name__)
 _BUILTIN_PLUGINS: list[type[BaseDataXLineagePlugin]] = [
     MysqlLineagePlugin,
     PostgresLineagePlugin,
+    StarrocksLineagePlugin,
 ]
 
 
